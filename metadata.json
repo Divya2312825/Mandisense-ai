@@ -1,0 +1,10 @@
+{
+  "name": "MandiSense AI",
+  "description": "Live Crop Price Prediction & Best-Market Advisor for farmers to optimize sale profits and discover optimal nearby mandis.",
+  "requestFramePermissions": [
+    "geolocation"
+  ],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}

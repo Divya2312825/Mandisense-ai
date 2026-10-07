@@ -13,6 +13,7 @@ import { AskMandiSenseInline } from './components/AskMandiSenseInline';
 import { WeatherInsightsCard } from './components/WeatherInsightsCard';
 import { AboutProjectView } from './components/AboutProjectView';
 import { LandingPage } from './components/LandingPage';
+import { MlPerformanceSection } from './components/MlPerformanceSection';
 import { CropInfo, MandiEvaluation, InsightsResponse, UserLocationState } from './types';
 import { Menu, X, Sparkles, Sprout } from 'lucide-react';
 
@@ -454,6 +455,13 @@ export default function App() {
                   recommendedMandiId={insights.recommendedMandi.id}
                 />
 
+                {/* 2b. Supervised ML Performance & Benchmark Evaluation */}
+                <MlPerformanceSection
+                  mlEvaluation={insights.mlEvaluation}
+                  supervisedMlPrediction={insights.selectedMandi.supervisedMlPrediction}
+                  cropName={insights.crop.name}
+                />
+
                 {/* 3. Best Market Advisor Recommendation & Logic */}
                 <MarketAdvisorCard
                   explanation={insights.advisorExplanation}
@@ -528,6 +536,11 @@ export default function App() {
                   forecast={insights.selectedMandi.forecast}
                   nearbyMandis={insights.allNearbyMandis}
                   recommendedMandiId={insights.recommendedMandi.id}
+                />
+                <MlPerformanceSection
+                  mlEvaluation={insights.mlEvaluation}
+                  supervisedMlPrediction={insights.selectedMandi.supervisedMlPrediction}
+                  cropName={insights.crop.name}
                 />
               </div>
             )}

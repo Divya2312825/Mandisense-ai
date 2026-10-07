@@ -226,7 +226,10 @@ Ask me about crop prices, 7-day forecast reasons, mandi comparisons, or why a ma
 
       const res = await fetch('/api/ai-chat', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+          'Content-Type': 'application/json',
+          Accept: 'application/json',
+        },
         body: JSON.stringify({
           message: textToSend,
           context,
@@ -234,9 +237,20 @@ Ask me about crop prices, 7-day forecast reasons, mandi comparisons, or why a ma
         }),
       });
 
+      const contentType = (res.headers.get('content-type') || '').toLowerCase();
+      if (!contentType.includes('application/json')) {
+        throw new Error(
+          'AI advisory service returned a non-JSON response. Please wait a moment and click Retry.'
+        );
+      }
+
       const data = await res.json();
       if (!res.ok) {
-        throw new Error(data.error || 'Failed to fetch AI advice');
+        throw new Error(data?.error || `Failed to fetch AI advice (HTTP ${res.status})`);
+      }
+
+      if (!data?.reply || typeof data.reply !== 'string') {
+        throw new Error('AI advisory service returned an empty reply. Please click Retry.');
       }
 
       const aiMsg: ChatMessage = {

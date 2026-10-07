@@ -34,7 +34,7 @@ export const LoadingSequenceModal: React.FC<LoadingSequenceModalProps> = ({
       return;
     }
 
-    let timeoutId: NodeJS.Timeout;
+    let timeoutId: ReturnType<typeof setTimeout>;
     const runStage = (index: number) => {
       if (index >= STAGES.length) {
         timeoutId = setTimeout(() => {

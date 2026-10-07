@@ -60,6 +60,33 @@ export interface MandiEvaluation {
   specializesInCrop: boolean;
   history: HistoryPoint[];
   forecast: ForecastPoint[];
+  supervisedMlPrediction?: SupervisedMlPredictionInfo;
+  holtForecast?: HoltForecastInfo;
+}
+
+export interface SupervisedMlPredictionInfo {
+  available: boolean;
+  methodLabel: string;
+  bestModelName: string;
+  predictedModalPrice: number | null;
+  linearRegressionPrediction: number | null;
+  randomForestPrediction: number | null;
+  xgboostPrediction: number | null;
+  preprocessingApplied: string[];
+  liveFeaturesUsed: Record<string, string | number>;
+  missingOrProxyLiveFeatures: string[];
+  usedHoltFallbackFor7Day: boolean;
+  limitationNote: string;
+}
+
+export interface HoltForecastInfo {
+  methodLabel: string;
+  alpha: number;
+  beta: number;
+  dampingFactor: number;
+  predictedPrice7d: number;
+  forecastPeak: ForecastPoint;
+  forecast: ForecastPoint[];
 }
 
 export interface AdvisorExplanation {
@@ -120,4 +147,57 @@ export interface InsightsResponse {
   apiUpdatedDate?: string | null;
   commodityUpdatedDate?: string | null;
   endpointUrl?: string;
+  mlEvaluation?: MlEvaluationReport;
 }
+
+export interface RegressionModelResult {
+  modelName: string;
+  role: string;
+  status: 'trained' | 'unavailable';
+  statusNote?: string;
+  mae: number;
+  mse: number;
+  rmse: number;
+  r2: number;
+  hyperparameters: Record<string, string | number>;
+}
+
+export interface FeatureImportanceMetric {
+  feature: string;
+  importance: number;
+  description: string;
+}
+
+export interface TestPredictionComparison {
+  recordId: string;
+  commodity: string;
+  category: string;
+  state: string;
+  market: string;
+  date: string;
+  actualModalPrice: number;
+  linearRegressionPredicted: number;
+  randomForestPredicted: number;
+  xgboostPredicted: number;
+}
+
+export interface MlEvaluationReport {
+  datasetName: string;
+  datasetPath: string;
+  totalRecords: number;
+  trainCount: number;
+  testCount: number;
+  splitRatio: string;
+  splitMethod: string;
+  targetVariable: string;
+  numericalFeatures: string[];
+  categoricalFeatures: string[];
+  encodedFeatureCount: number;
+  models: RegressionModelResult[];
+  bestModel: RegressionModelResult;
+  selectionCriterion: string;
+  featureImportances: FeatureImportanceMetric[];
+  sampleTestPredictions: TestPredictionComparison[];
+  evaluatedAt: string;
+}
+

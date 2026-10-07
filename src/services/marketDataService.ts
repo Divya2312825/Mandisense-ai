@@ -19,6 +19,15 @@ import {
   FARMER_IN_ML_FORECAST_LABEL,
   FARMER_IN_UNAVAILABLE_MESSAGE,
 } from './farmerMandiService.ts';
+import {
+  getOrTrainMlEvaluationReport,
+  predictLiveMandiRecordWithBestModel,
+} from './mlPricePredictionService.ts';
+import type {
+  MlEvaluationReport,
+  SupervisedMlPredictionInfo,
+  HoltForecastInfo,
+} from '../types/index.ts';
 
 export interface CropInfo {
   id: string;
@@ -96,6 +105,8 @@ export interface MandiEvaluation {
   specializesInCrop: boolean;
   history: HistoryPoint[];
   forecast: ForecastPoint[];
+  supervisedMlPrediction?: SupervisedMlPredictionInfo;
+  holtForecast?: HoltForecastInfo;
 }
 
 export interface AdvisorExplanation {
@@ -152,6 +163,7 @@ export interface MarketInsightsResult {
   commodityUpdatedDate: string | null;
   endpointUrl: string;
   governmentData: FarmerInMandiDataResult;
+  mlEvaluation?: MlEvaluationReport;
 }
 
 export const CROPS: CropInfo[] = [
@@ -433,7 +445,8 @@ function buildMandiEvaluation(
   record: FarmerInMandiRecord | null,
   hasUserLocation: boolean,
   userLat?: number | null,
-  userLng?: number | null
+  userLng?: number | null,
+  rawSeason?: string
 ): MandiEvaluation {
   const transportRatePerKmPerQ = 2.4;
   const mandiCessPerQ = 18;
@@ -448,6 +461,13 @@ function buildMandiEvaluation(
     transportCost = Math.round(distanceKm * transportRatePerKmPerQ);
   }
 
+  // Run Supervised ML Best Model prediction (returns available: false if record is null or missing features)
+  const supervisedMlPrediction = predictLiveMandiRecordWithBestModel(
+    record,
+    crop.category,
+    rawSeason
+  );
+
   // If the endpoint failed (`record === null`), do NOT invent fake prices
   if (!record || record.modalPrice <= 0) {
     const emptyForecastPt: ForecastPoint = {
@@ -459,6 +479,11 @@ function buildMandiEvaluation(
       upperBound: 0,
       confidenceScore: 0,
     };
+    const emptyForecastList = Array.from({ length: 7 }, (_, idx) => ({
+      ...emptyForecastPt,
+      date: `unavail_${mandiMeta.id}_${idx + 1}`,
+      dayName: `Day ${idx + 1}`,
+    }));
     return {
       id: mandiMeta.id,
       name: `${mandiMeta.name} (${mandiMeta.district})`,
@@ -493,11 +518,17 @@ function buildMandiEvaluation(
         { date: `u1_${mandiMeta.id}`, displayDate: 'N/A', price: 0, volume: 0, msp: crop.baseMsp },
         { date: `u2_${mandiMeta.id}`, displayDate: 'N/A', price: 0, volume: 0, msp: crop.baseMsp },
       ],
-      forecast: Array.from({ length: 7 }, (_, idx) => ({
-        ...emptyForecastPt,
-        date: `unavail_${mandiMeta.id}_${idx + 1}`,
-        dayName: `Day ${idx + 1}`,
-      })),
+      forecast: emptyForecastList,
+      supervisedMlPrediction,
+      holtForecast: {
+        methodLabel: "Holt's Double Exponential Smoothing (7-Day Time-Series Forecast)",
+        alpha: 0.55,
+        beta: 0.25,
+        dampingFactor: 0.88,
+        predictedPrice7d: 0,
+        forecastPeak: emptyForecastPt,
+        forecast: emptyForecastList,
+      },
     };
   }
 
@@ -514,6 +545,16 @@ function buildMandiEvaluation(
     (best, curr) => (curr.predictedPrice > best.predictedPrice ? curr : best),
     forecast[0]
   );
+
+  const holtForecast: HoltForecastInfo = {
+    methodLabel: "Holt's Double Exponential Smoothing (7-Day Time-Series Forecast)",
+    alpha: 0.55,
+    beta: 0.25,
+    dampingFactor: 0.88,
+    predictedPrice7d,
+    forecastPeak,
+    forecast,
+  };
 
   const prevPrice = modalPrice - (record.priceChange || 0);
   const change24h =
@@ -563,6 +604,8 @@ function buildMandiEvaluation(
     specializesInCrop: mandiMeta.primaryCrops.includes(crop.id),
     history,
     forecast,
+    supervisedMlPrediction,
+    holtForecast,
   };
 }
 
@@ -606,6 +649,8 @@ export async function calculateMarketInsights(params: {
 
   let evaluatedMandis: MandiEvaluation[] = [];
 
+  const rawSeason = farmerData.rawCommodityMatched?.season;
+
   if (farmerData.available && farmerData.records.length > 0) {
     evaluatedMandis = farmerData.records.map((rec) => {
       const meta =
@@ -618,12 +663,13 @@ export async function calculateMarketInsights(params: {
         rec,
         hasUserLocation,
         params.userLat,
-        params.userLng
+        params.userLng,
+        rawSeason
       );
     });
   } else {
     evaluatedMandis = MANDIS.map((m) =>
-      buildMandiEvaluation(crop, m, null, hasUserLocation, params.userLat, params.userLng)
+      buildMandiEvaluation(crop, m, null, hasUserLocation, params.userLat, params.userLng, rawSeason)
     );
   }
 
@@ -710,6 +756,13 @@ export async function calculateMarketInsights(params: {
     status: hasUserLocation ? 'granted' : 'unavailable',
   };
 
+  let mlEvaluation: MlEvaluationReport | undefined;
+  try {
+    mlEvaluation = getOrTrainMlEvaluationReport();
+  } catch (err) {
+    console.error('ML Evaluation training warning:', err);
+  }
+
   return {
     crop,
     selectedMandi,
@@ -728,5 +781,6 @@ export async function calculateMarketInsights(params: {
     commodityUpdatedDate: commodityDate,
     endpointUrl: FARMER_IN_OPEN_PRICES_JSON_URL,
     governmentData: farmerData,
+    mlEvaluation,
   };
 }

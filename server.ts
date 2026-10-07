@@ -13,6 +13,7 @@ import {
   FARMER_IN_SOURCE_LABEL,
   FARMER_IN_UNAVAILABLE_MESSAGE,
 } from './src/services/farmerMandiService.ts';
+import { getOrTrainMlEvaluationReport } from './src/services/mlPricePredictionService.ts';
 
 dotenv.config();
 
@@ -22,22 +23,52 @@ const __dirname = path.dirname(__filename);
 const app = express();
 const PORT = 3000;
 
-app.use(express.json());
+app.use(express.json({ limit: '2mb' }));
+
+// Ensure malformed JSON payloads on /api/* routes always return JSON instead of Express default HTML
+app.use((err: any, req: express.Request, res: express.Response, next: express.NextFunction) => {
+  if (req.path.startsWith('/api/')) {
+    res.setHeader('Content-Type', 'application/json; charset=utf-8');
+    return res.status(err?.status || 400).json({
+      error: 'Invalid JSON request payload.',
+      details: err?.message || 'Request body could not be parsed as JSON.',
+    });
+  }
+  next(err);
+});
 
 // Initialize GoogleGenAI SDK
 const apiKey = process.env.GEMINI_API_KEY || '';
-const ai = new GoogleGenAI({
-  apiKey: apiKey,
-  httpOptions: {
-    headers: {
-      'User-Agent': 'aistudio-build',
+const createGeminiClient = (key: string) =>
+  new GoogleGenAI({
+    apiKey: key,
+    httpOptions: {
+      headers: {
+        'User-Agent': 'aistudio-build',
+      },
+      timeout: 15000,
     },
-  },
-});
+  });
+const ai = createGeminiClient(apiKey);
 
 // API Routes
 app.get('/api/crops', (req, res) => {
   res.json({ crops: CROPS });
+});
+
+// Academic ML Model Training & Evaluation endpoint
+app.get('/api/ml-evaluation', (req, res) => {
+  try {
+    const forceRetrain = req.query.retrain === 'true';
+    const report = getOrTrainMlEvaluationReport(forceRetrain);
+    res.json(report);
+  } catch (error: any) {
+    console.error('Error in GET /api/ml-evaluation:', error);
+    res.status(500).json({
+      error: 'Failed to train and evaluate ML regression models',
+      details: error.message,
+    });
+  }
 });
 
 // Reverse Geocoding endpoint: converts real detected (lat, lng) into place / locality, district, state
@@ -275,18 +306,21 @@ app.post('/api/insights', async (req, res) => {
 
 // Gemini AI Assistant "Ask MandiSense AI" endpoint
 app.post('/api/ai-chat', async (req, res) => {
+  res.setHeader('Content-Type', 'application/json; charset=utf-8');
   try {
-    const { message, context, history } = req.body;
+    const { message, context, history } = req.body || {};
 
     if (!message || typeof message !== 'string') {
       return res.status(400).json({ error: 'Message is required and must be a string.' });
     }
 
-    if (!apiKey) {
+    const activeApiKey = process.env.GEMINI_API_KEY || apiKey;
+    if (!activeApiKey) {
       return res.status(500).json({
         error: 'GEMINI_API_KEY is not configured on the server. Please ensure the API key is set in environment secrets.',
       });
     }
+    const geminiClient = activeApiKey === apiKey ? ai : createGeminiClient(activeApiKey);
 
     // Format 30-day historical price summary
     const historyList = Array.isArray(context?.historicalData)
@@ -439,14 +473,17 @@ Answer the farmer's question directly and concisely based strictly on the above 
       parts: [{ text: message }],
     });
 
-    // Attempt generation with automatic retry on temporary high demand (503/429)
+    // Attempt generation across supported Gemini Flash models
+    // Note: gemini-3.1-flash-lite is tried first for low-latency reliability when gemini-3.8-flash experiences 503 spikes
+    const candidateModels = ['gemini-3.1-flash-lite', 'gemini-3.8-flash'];
     let response: any = null;
     let lastError: any = null;
 
-    for (let attempt = 1; attempt <= 2; attempt++) {
+    for (let i = 0; i < candidateModels.length; i++) {
+      const modelName = candidateModels[i];
       try {
-        response = await ai.models.generateContent({
-          model: 'gemini-3.8-flash',
+        response = await geminiClient.models.generateContent({
+          model: modelName,
           contents: contents,
           config: {
             systemInstruction,
@@ -454,25 +491,31 @@ Answer the farmer's question directly and concisely based strictly on the above 
             topP: 0.85,
           },
         });
-        if (response) break;
+        if (response && response.text) break;
       } catch (err: any) {
         lastError = err;
         const isTransient =
           err?.status === 503 ||
+          err?.status === 504 ||
+          err?.status === 429 ||
           err?.message?.includes('503') ||
+          err?.message?.includes('504') ||
           err?.message?.includes('UNAVAILABLE') ||
+          err?.message?.includes('DEADLINE_EXCEEDED') ||
           err?.message?.includes('high demand');
-        if (isTransient && attempt < 2) {
-          // Brief pause before single retry
-          await new Promise((resolve) => setTimeout(resolve, 1500));
+        if (isTransient && i < candidateModels.length - 1) {
           continue;
         }
         throw err;
       }
     }
 
+    if (!response && lastError) {
+      throw lastError;
+    }
+
     const answer = response?.text?.trim() || "I don't have that information in the current MandiSense data.";
-    res.json({ reply: answer });
+    return res.status(200).json({ reply: answer });
   } catch (error: any) {
     console.error('Gemini API chat error:', error);
     const isRateLimit =
@@ -489,22 +532,36 @@ Answer the farmer's question directly and concisely based strictly on the above 
 
     const isHighDemand =
       error?.status === 503 ||
+      error?.status === 504 ||
       error?.message?.includes('503') ||
+      error?.message?.includes('504') ||
       error?.message?.includes('UNAVAILABLE') ||
+      error?.message?.includes('DEADLINE_EXCEEDED') ||
+      error?.message?.includes('Deadline expired') ||
       error?.message?.includes('high demand');
 
+    // IMPORTANT: Never return HTTP 502/503/504 because the container Nginx proxy has
+    // `error_page 502 503 504 = /warmup.html`, which replaces 503 JSON responses with HTML (HTTP 200).
     if (isHighDemand) {
-      return res.status(503).json({
+      return res.status(500).json({
         error: 'The advisory service is experiencing temporary peak demand. Please click Retry.',
-        details: 'Model high demand (503). Please retry.',
+        details: 'Model high demand. Please retry.',
       });
     }
 
-    res.status(500).json({
+    return res.status(500).json({
       error: 'Unable to connect to MandiSense AI advisory model. Please check your network connection and click Retry.',
-      details: error.message,
+      details: error?.message || 'Unexpected server error',
     });
   }
+});
+
+// Prevent any unmatched /api/* route from falling through to Vite/SPA index.html (which would return <!doctype html>)
+app.use('/api', (req, res) => {
+  res.setHeader('Content-Type', 'application/json; charset=utf-8');
+  return res.status(404).json({
+    error: `API route not found: ${req.method} ${req.originalUrl}`,
+  });
 });
 
 // Vite middleware in dev or static files in production
